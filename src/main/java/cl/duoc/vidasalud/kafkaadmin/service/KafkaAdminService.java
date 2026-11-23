@@ -68,6 +68,10 @@ public class KafkaAdminService {
             "retention.ms", "retention.bytes", "cleanup.policy", "min.insync.replicas",
             "max.message.bytes", "segment.bytes", "delete.retention.ms", "compression.type");
 
+    /** Reintentos para esperar la propagacion de metadatos entre brokers (25 x 200 ms = 5 s). */
+    private static final int METADATA_RETRIES = 25;
+    private static final long METADATA_RETRY_DELAY_MS = 200;
+
     private static final Set<String> CLEANUP_POLICIES = Set.of("delete", "compact", "compact,delete", "delete,compact");
 
     private final Admin admin;
@@ -189,7 +193,27 @@ public class KafkaAdminService {
         } catch (InvalidPartitionsException e) {
             throw new InvalidRequestException(e.getMessage());
         }
-        return describeTopic(name);
+        return describeWhenPartitionsVisible(name, newTotal);
+    }
+
+    /**
+     * En un cluster de varios brokers los metadatos tardan un instante en
+     * propagarse: describir el topico justo despues de aumentar las particiones
+     * puede devolver todavia el total anterior. Se reintenta unos segundos hasta
+     * ver el total nuevo, para que la respuesta refleje lo que ya se aplico.
+     */
+    private TopicDetail describeWhenPartitionsVisible(String name, int expected) {
+        TopicDetail detail = describeTopic(name);
+        for (int attempt = 0; attempt < METADATA_RETRIES && detail.partitions() < expected; attempt++) {
+            try {
+                Thread.sleep(METADATA_RETRY_DELAY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            detail = describeTopic(name);
+        }
+        return detail;
     }
 
     public void deleteTopic(String name) {
